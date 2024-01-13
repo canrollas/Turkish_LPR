@@ -1,47 +1,67 @@
+import logging
+
 import cv2
+import numpy as np
 import torch
+from sort import Sort
 
-# Open the default camera (usually the built-in webcam)
-cap = cv2.VideoCapture(0)
 
-# Check if the camera opened successfully
-if not cap.isOpened():
-    print("Error: Could not open camera.")
-    exit()
+def initialize_sort_tracker():
+    return Sort()
 
-brands = ['renault', 'mercedes', 'volvo', 'bmw', 'volkswagen', 'ford', 'citroen', 'toyota', 'kia', 'fiat', 'honda',
-          'skoda', 'plate', 'nissan', 'seat', 'peugeot', 'opel', 'audi', 'hyundai', 'rover']
-model = torch.hub.load('ultralytics/yolov5', 'custom',
-                       path='/Users/canrollas/Projects/OCR/yolov5/runs/train/exp4/weights/best.pt')
 
-# load car.xml as Cascade model
-car_model = cv2.CascadeClassifier('cars.xml')
-
-while True:
-    # Capture frame-by-frame
-    ret, frame = cap.read()
-
-    # If the frame was read successfully, display it
+def detect_plates(model, frame):
     results = model(frame)
+    detections = []
+
     for result in results.pred:
         for *xyxy, conf, cls in result:
-            if brands[int(cls.item())] == 'plate':
-                cv2.rectangle(frame, (int(xyxy[0]), int(xyxy[1])), (int(xyxy[2]), int(xyxy[3])), (0, 0, 255), 2)
-                cv2.putText(frame, 'Plate', (int(xyxy[0]), int(xyxy[1])), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2,
-                            cv2.LINE_AA)
-            if brands[int(cls.item())] != 'plate':
-                cv2.rectangle(frame, (int(xyxy[0]), int(xyxy[1])), (int(xyxy[2]), int(xyxy[3])), (0, 255, 0), 2)
-                cv2.putText(frame, brands[int(cls.item())], (int(xyxy[0]), int(xyxy[1])), cv2.FONT_HERSHEY_SIMPLEX, 1,
-                            (0, 255, 0), 2, cv2.LINE_AA)
+            if int(cls.item()) == 12:
+                detections.append([int(xyxy[0]), int(xyxy[1]), int(xyxy[2]), int(xyxy[3]), 0])
 
-    if ret:
-        # Display the frame
+    return detections
+
+
+def main():
+    cap = cv2.VideoCapture(0)
+
+    if not cap.isOpened():
+        print("Error: Could not open camera.")
+        exit()
+
+    model = torch.hub.load('ultralytics/yolov5', 'custom',
+                           path='/Users/canrollas/Projects/OCR/yolov5/runs/train/exp4/weights/best.pt')
+
+    sort_tracker = initialize_sort_tracker()
+    sort_tracker_car = initialize_sort_tracker()
+
+    while True:
+        ret, frame = cap.read()
+
+        if not ret:
+            break
+
+        detections = detect_plates(model, frame)
+
+        try:
+            trackers = sort_tracker.update(np.array(detections))
+        except Exception as e:
+            logging.error("Error updating plate tracker:", exc_info=True)
+            trackers = []
+
+        for d in trackers:
+            left, top, right, bottom, track_id = map(int, d)
+            cv2.rectangle(frame, (left, top), (right, bottom), (0, 255, 0), 2)
+            cv2.putText(frame, str("Plate"), (left, top), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2, cv2.LINE_AA)
+
         cv2.imshow('Webcam', frame)
 
-    # Break the loop if the 'q' key is pressed
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        break
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
 
-# Release the camera and close the window
-cap.release()
-cv2.destroyAllWindows()
+    cap.release()
+    cv2.destroyAllWindows()
+
+
+if __name__ == "__main__":
+    main()
