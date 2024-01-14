@@ -5,15 +5,14 @@ import cv2
 import numpy as np
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QImage, QPixmap
-from PyQt5.QtWidgets import QApplication, QLabel, QMainWindow, QVBoxLayout, QWidget, QListWidget, QGridLayout, \
-    QScrollArea, QHBoxLayout
+from PyQt5.QtWidgets import QApplication, QLabel, QMainWindow, QVBoxLayout, QWidget, QListWidget, QHBoxLayout
 from queue import Queue
 from threading import Thread
 import torch
 from pytesseract import pytesseract
 
 from sort import Sort
-
+from yolov5.utils.torch_utils import select_device
 
 
 class PlateRecognitionApp(QMainWindow):
@@ -24,12 +23,11 @@ class PlateRecognitionApp(QMainWindow):
         if not self.cap.isOpened():
             print("Error: Could not open camera.")
             sys.exit()
-
+        self.device = select_device('')
         self.model = torch.hub.load('ultralytics/yolov5', 'custom',
-                                    path='/Users/canrollas/Projects/OCR/yolov5/runs/train/exp4/weights/best.pt')
+                                    path='/Users/canrollas/Projects/OCR/exp4/weights/best.pt')
         self.vehicle_model = torch.hub.load('ultralytics/yolov5', 'custom',
-                                            path='/Users/canrollas/Projects/OCR/best_car_1.pt')
-
+                                            path='/Users/canrollas/Projects/OCR/brands.pt')
 
         self.sort_tracker = Sort()
         self.vehicle_sort_tracker = Sort()
@@ -66,13 +64,12 @@ class PlateRecognitionApp(QMainWindow):
         self.video_label.setAlignment(Qt.AlignCenter)
         self.central_widget.layout().addWidget(self.video_label)
         self.video_label.setScaledContents(True)
-
+        self.brand_labels = ['mercedes', 'peugeot', 'renault', 'toyota', 'volkswagen']
         self.timer = QTimer()
         self.timer.timeout.connect(self.update_frame)
         self.timer.start(50)
 
-        self.setWindowTitle("Safe Campus Transport App")
-
+        self.setWindowTitle("Plate Recognition App")
 
     def init_threads(self):
         process_thread = Thread(target=self.process_plate_extraction)
@@ -89,40 +86,24 @@ class PlateRecognitionApp(QMainWindow):
 
             self.video_label.setPixmap(pixmap)
 
-    def detect_brand(self,frame,model):
-        results = model(frame)
-        detections = []
 
-        for result in results.pred:
-            for *xyxy, conf, cls in result:
-                if int(cls.item()) == 1:
-                    detections.append([int(xyxy[0]), int(xyxy[1]), int(xyxy[2]), int(xyxy[3]), 0])
-
-        return detections
-
-    def detect_vehicle(self,frame,model):
-        results = model(frame)
-        detections = []
-
-        for result in results.pred:
-            for *xyxy, conf, cls in result:
-                if int(cls.item()) == 0:
-                    detections.append([int(xyxy[0]), int(xyxy[1]), int(xyxy[2]), int(xyxy[3]), 0])
-
-        return detections
-
-    def draw_vehicle_rectangle_and_text(self, frame, left, top, right, bottom, track_id, tracked_ids_map):
+    def draw_vehicle_rectangle_and_text(self, frame, left, top, right, bottom, class_id):
         # Draw the bounding box and the text on the frame is Vehicle
         GREEN = (255, 0, 0)
-
+        # find the brand name 0: mercedes, 1: peugeot, 2: renault, 3: toyota, 4: volkswagen
+        print(class_id)
+        if class_id < 0 or class_id > 4:
+            brand_name = "Unknown"
+        else:
+            brand_name = self.brand_labels[class_id]
         cv2.rectangle(frame, (left, top), (right, bottom), GREEN, 2)
-        cv2.putText(frame, f"Vehicle", (left - 20, top - 15), cv2.FONT_HERSHEY_SIMPLEX,
-                    1, GREEN, 2, cv2.LINE_AA)
-
+        cv2.putText(frame, f"Vehicle: {brand_name}", (left - 20, top - 15), cv2.FONT_HERSHEY_SIMPLEX, 1, GREEN, 2,
+                    cv2.LINE_AA)
 
     def process_plate_extraction(self):
         tracked_ids = set()
         tracked_ids_map = {}
+        brand_tracktion_map = {}
         tracked_ids_validation = {}
 
         while True:
@@ -149,12 +130,8 @@ class PlateRecognitionApp(QMainWindow):
             # Detect plates using YOLO model
             detections = self.detect_objects(result_frame, class_id=12)
 
-            # Detect vehicles using the bestcardetect model
-            vehicle_detections = self.detect_vehicle(frame, model=self.vehicle_model)
-
-            # Detect brands using the branddetect model
-
-            if not detections :
+            brand_detections = self.detect_brand(frame, model=self.vehicle_model,track_map=brand_tracktion_map)
+            if not detections:
                 self.frame_queue.put(frame)
                 continue
 
@@ -165,14 +142,19 @@ class PlateRecognitionApp(QMainWindow):
                 trackers = []
 
             try:
-                vehicle_trackers = self.vehicle_sort_tracker.update(np.array(vehicle_detections))
+                if brand_detections:
+                    print("Brand Detections:", brand_detections)
+                    vehicle_trackers = self.vehicle_sort_tracker.update(np.array(brand_detections))
+                else:
+                    vehicle_trackers = []
             except Exception as e:
                 print("Error updating vehicle tracker:", e)
                 vehicle_trackers = []
 
             for d in trackers:
+                print(d)
                 left, top, right, bottom, track_id = map(int, d)
-
+                print("Track ID:", track_id)
                 # Check if the object is not already tracked
                 if track_id not in tracked_ids or track_id not in tracked_ids_map:
                     roi = frame[top:bottom, left:right]  # Extract ROI
@@ -212,9 +194,20 @@ class PlateRecognitionApp(QMainWindow):
 
                 # Check if the object is not already tracked
                 if track_id not in tracked_ids or track_id not in tracked_ids_map:
-                    self.draw_vehicle_rectangle_and_text(frame, left, top, right, bottom, track_id, tracked_ids_map)
+                    # draw the bounding box and the text on the frame with brand name
+                    roi = frame[top:bottom, left:right]
+
+                    self.draw_vehicle_rectangle_and_text(frame, left, top, right, bottom, brand_tracktion_map[0])
                     tracked_ids.add(track_id)
 
+
+
+
+                else:
+                    tracked_ids_validation[track_id] += 1
+                    if tracked_ids_validation[track_id] == 5:
+                        # Validate the extracted text from the plate image and update the map
+                        roi = frame[top:bottom, left:right]
 
             self.frame_queue.put(frame)
 
@@ -261,6 +254,17 @@ class PlateRecognitionApp(QMainWindow):
 
         return detections
 
+    def detect_brand(self, frame, model,track_map):
+        results = model(frame)
+        detections = []
+
+        for result in results.pred:
+            for *xyxy, conf, cls in result:
+                detections.append([int(xyxy[0]), int(xyxy[1]), int(xyxy[2]), int(xyxy[3]), 0])
+                track_map[0] = int(cls.item())
+        return detections
+
+
     @staticmethod
     def text_validate_plate(text):
         turkish_plate_pattern1 = re.compile(r'^\d{2}[A-Z]{2,3}\d{2,3}$')
@@ -298,7 +302,8 @@ class PlateRecognitionApp(QMainWindow):
                 cv2.putText(frame, f"Plate: {plate_text_spaced_vers} (Registered)", (left - 20, top - 15),
                             cv2.FONT_HERSHEY_SIMPLEX, 1, GREEN, 2, cv2.LINE_AA)
             else:
-                cv2.putText(frame, f"Plate: {plate_text_spaced_vers} (Not Registered)", (left - 20, top - 15), cv2.FONT_HERSHEY_SIMPLEX,
+                cv2.putText(frame, f"Plate: {plate_text_spaced_vers} (Not Registered)", (left - 20, top - 15),
+                            cv2.FONT_HERSHEY_SIMPLEX,
                             1, GREEN, 2, cv2.LINE_AA)
         else:
             if self.unknown_plate.get(track_id) is None:
