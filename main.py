@@ -1,41 +1,40 @@
+import cv2
+from concurrent.futures import ThreadPoolExecutor
+
 import re
+import time
 from difflib import SequenceMatcher
 
-import cv2
 import imutils
 import torch
-from vidgear.gears import CamGear
 from queue import Queue
 
 from threading import Thread, Lock
 import pytesseract
 
-stream = CamGear(source='https://www.youtube.com/watch?v=2pRTWZXuoN8', stream_mode=True, logging=True).start()
+start_time = time.time()
+fps_counter = 0
+
+video_path = 'temp1.mp4'  # Update with the path to your video file
+cap = cv2.VideoCapture(video_path)
 
 brands = ['renault', 'mercedes', 'volvo', 'bmw', 'volkswagen', 'ford', 'citroen', 'toyota', 'kia', 'fiat', 'honda',
           'skoda', 'plate', 'nissan', 'seat', 'peugeot', 'opel', 'audi', 'hyundai', 'rover']
-model = torch.hub.load('ultralytics/yolov5', 'custom',
-                       path='/Users/canrollas/Projects/OCR/exp4/weights/best.pt')  # custom model
+model = torch.hub.load('ultralytics/yolov5', 'custom', path='/Users/canrollas/Projects/OCR/exp4/weights/best.pt')
+brand_model = torch.hub.load('ultralytics/yolov5', 'custom', path='/Users/canrollas/Projects/OCR/brands.pt')
 
-brand_model = torch.hub.load('ultralytics/yolov5', 'custom',
-                             path='/Users/canrollas/Projects/OCR/brands.pt')  # custom model
+white_list = ["34ACN264", "66ACE441", "16ASG040", "06CCD368", "28YH184"]
 
-white_list = ["34ACN264","66ACE441","16ASG040","06CCD368","28YH184"]
-
-# Use threading and Lock
 lock = Lock()
 text_result = None
 frame_queue = Queue()
 
-
 def find_similar_text(text):
-
     for i in white_list:
         sim_measure = SequenceMatcher(None, text, i).ratio()
         if sim_measure > 0.8:
             return i
     return ""
-
 
 def extract_text(roi):
     gray_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
@@ -43,13 +42,11 @@ def extract_text(roi):
 
     resized_roi = cv2.resize(thresholded_roi, (0, 0), fx=0.5, fy=0.5)
 
-    # Rotate and find the best match
     CONFIG = r'--oem 1 --psm 6 -c tessedit_char_whitelist=0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ'
 
     crop_img = resized_roi[0:resized_roi.shape[0], 0:resized_roi.shape[1] - 10]
 
-    # rotate the image -15 degreees to 15 degrees with 1 degree increments
-    for i in range(-30, 30, 3):
+    for i in range(-15, 15, 3):
         rotated_roi = imutils.rotate(crop_img, i)
         text = pytesseract.image_to_string(rotated_roi, config=CONFIG)
         if text_validate_plate(text) != "Not found":
@@ -65,63 +62,54 @@ def text_validate_plate(text):
         return turkish_plate_pattern2.match(text).group()
     else:
         return "Not found"
-def process_frames():
+
+def process_frame(frame):
+    global fps_counter, start_time, fps
+
+    results = model(frame)
+    for result in results.pred:
+        for *xyxy, conf, cls in result:
+            if brands[int(cls.item())] == 'plate':
+                text_img = frame[int(xyxy[1]):int(xyxy[3]), int(xyxy[0]):int(xyxy[2])]
+                text = extract_text(text_img)
+                text = re.sub('[^A-Za-z0-9]+', '', text)
+                better_text = find_similar_text(text)
+                if better_text != "":
+                    text = better_text
+                if text != "Not found":
+                    cv2.rectangle(frame, (int(xyxy[0]), int(xyxy[1])), (int(xyxy[2]), int(xyxy[3])), (0, 255, 0), 2)
+                    cv2.putText(frame, 'Plate:' + text, (int(xyxy[0]), int(xyxy[1])), cv2.FONT_HERSHEY_SIMPLEX, 1,
+                                (0, 255, 0), 2, cv2.LINE_AA)
+                else:
+                    cv2.rectangle(frame, (int(xyxy[0]), int(xyxy[1])), (int(xyxy[2]), int(xyxy[3])), (0, 0, 255), 2)
+                    cv2.putText(frame, 'Plate:' + "Camera Position error not extracted",
+                                (int(xyxy[0]), int(xyxy[1])), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2,
+                                cv2.LINE_AA)
+    fps_counter += 1
+    elapsed_time = time.time() - start_time
+    if elapsed_time > 1:
+        fps = fps_counter / elapsed_time
+        fps_counter = 0
+        start_time = time.time()
+
+    cv2.putText(frame, f'FPS: {fps:.2f}', (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2, cv2.LINE_AA)
+    frame = cv2.resize(frame, (640, 480))
+
+    return frame
+
+with ThreadPoolExecutor() as executor:
     while True:
-        frames = stream.read()
-        results = model(frames)
-        brand_results = brand_model(frames)
-        print(results.pred)
+        ret, frames = cap.read()
+        if not ret:
+            break
 
-        # Draw bounding boxes and labels of detections per each frame in the video
-        for result in results.pred:
-            for *xyxy, conf, cls in result:
-                if brands[int(cls.item())] == 'plate':
-                    # Draw bounding box and label for the plate
-                    text_img = frames[int(xyxy[1]):int(xyxy[3]), int(xyxy[0]):int(xyxy[2])]
-                    text = extract_text(text_img)
-                    print("Text is: ", text)
-                    # remove all non-alphanumeric characters from the text
-                    text = re.sub('[^A-Za-z0-9]+', '', text)
-                    better_text = find_similar_text(text)
-                    if better_text != "":
-                        text = better_text
-                    if text != "Not found":
-                        cv2.rectangle(frames, (int(xyxy[0]), int(xyxy[1])), (int(xyxy[2]), int(xyxy[3])),
-                                      (0, 255, 0), 2)
-                        cv2.putText(frames, 'Plate:' + text, (int(xyxy[0]), int(xyxy[1])),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 1,
-                                    (0, 255, 0), 2,
-                                    cv2.LINE_AA)
-                    else:
-                        cv2.rectangle(frames, (int(xyxy[0]), int(xyxy[1])), (int(xyxy[2]), int(xyxy[3])),
-                                      (0, 0, 255), 2)
-                        cv2.putText(frames, 'Plate:' + "Camera Position error not extracted",
-                                    (int(xyxy[0]), int(xyxy[1])), cv2.FONT_HERSHEY_SIMPLEX, 1,
-                                    (0, 0, 255), 2,
-                                    cv2.LINE_AA)
+        processed_frames = list(executor.map(process_frame, [frames]))
 
-        # Display output
-        frames = cv2.resize(frames, (640, 480))  # Adjust the size as needed
-        frame_queue.put(frames)
+        for processed_frame in processed_frames:
+            cv2.imshow('Car Detection', processed_frame)
 
+        if cv2.waitKey(1) == ord('q'):
+            break
 
-# Start the processing thread
-process_thread = Thread(target=process_frames)
-process_thread.start()
-
-
-while True:
-    frames = frame_queue.get()
-    cv2.imshow('Car Detection', frames)
-
-    if cv2.waitKey(1) == ord('q'):
-        break
-
-    cv2.destroyAllWindows()
-
-
-
-
-
-# Wait for both threads to finish
-process_thread.join()
+cap.release()
+cv2.destroyAllWindows()
